@@ -2,7 +2,6 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Set
 from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 TAG_PATTERN = re.compile(r"<<\s*([A-Z0-9_]+)\s*>>")
 KNOWN_SINGLE_TAGS = [
@@ -27,16 +26,15 @@ class TemplateTagReport:
 
 
 def _shape_text(shape):
-    if not getattr(shape, 'has_text_frame', False):
-        return ''
-    return '
-'.join(p.text for p in shape.text_frame.paragraphs)
+    if not getattr(shape, "has_text_frame", False):
+        return ""
+    return "\n".join(p.text for p in shape.text_frame.paragraphs)
 
 
 def extract_tags_from_pptx(pptx_path_or_file) -> TemplateTagReport:
     prs = Presentation(pptx_path_or_file)
     if len(prs.slides) == 0:
-        raise ValueError('Uploaded template has no slides.')
+        raise ValueError("Uploaded template has no slides.")
     slide = prs.slides[0]
     all_tags: Set[str] = set()
     for shape in slide.shapes:
@@ -45,7 +43,10 @@ def extract_tags_from_pptx(pptx_path_or_file) -> TemplateTagReport:
             all_tags.add(m.group(1))
     report = TemplateTagReport(all_tags=all_tags)
     for tag in KNOWN_SINGLE_TAGS:
-        (report.found_single_tags if tag in all_tags else report.missing_single_tags).append(tag)
+        if tag in all_tags:
+            report.found_single_tags.append(tag)
+        else:
+            report.missing_single_tags.append(tag)
     speaker_fields_present: Dict[str, List[int]] = {p: [] for p in SPEAKER_FIELD_PREFIXES}
     max_slot = 0
     for tag in all_tags:
@@ -61,5 +62,5 @@ def extract_tags_from_pptx(pptx_path_or_file) -> TemplateTagReport:
     report.speaker_fields_present = speaker_fields_present
     report.max_speaker_slot = max_slot
     if max_slot == 0:
-        report.warnings.append('No <<SPEAKER_NAME_n>> style tags were found on slide 1.')
+        report.warnings.append("No <<SPEAKER_NAME_n>> style tags were found on slide 1.")
     return report
