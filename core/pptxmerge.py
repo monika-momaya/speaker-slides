@@ -9,8 +9,8 @@ TAG_RE = re.compile(r'<<\s*([A-Z0-9_]+)\s*>>')
 
 
 def _duplicate_slide(prs: Presentation, source_slide):
-    blank_layout = prs.slide_layouts[len(prs.slide_layouts) - 1]
-    new_slide = prs.slides.add_slide(blank_layout)
+    layout = prs.slide_layouts[0] if len(prs.slide_layouts) else None
+    new_slide = prs.slides.add_slide(layout) if layout is not None else prs.slides.add_slide(prs.slide_layouts[len(prs.slide_layouts)-1])
     for shp in source_slide.shapes:
         newel = copy.deepcopy(shp.element)
         new_slide.shapes._spTree.insert_element_before(newel, 'p:extLst')
@@ -23,11 +23,12 @@ def _shape_text(shape):
     return '\n'.join(''.join(r.text for r in p.runs) if p.runs else p.text for p in shape.text_frame.paragraphs)
 
 
-def _replace_tag_text_preserve_runs(shape, values: Dict[str, str]):
+def _replace_text_in_shape(shape, values: Dict[str, str]):
     if not getattr(shape, 'has_text_frame', False):
         return False
     changed = False
-    for para in shape.text_frame.paragraphs:
+    tf = shape.text_frame
+    for para in tf.paragraphs:
         for run in para.runs:
             txt = run.text or ''
             if '<<' not in txt:
@@ -42,39 +43,38 @@ def _replace_tag_text_preserve_runs(shape, values: Dict[str, str]):
     return changed
 
 
-def _find_photo_placeholder(slide, tag='SPEAKER_PHOTO_1'):
-    pattern = re.compile(r'<<\s*' + re.escape(tag) + r'\s*>>')
-    for shape in slide.shapes:
-        if getattr(shape, 'has_text_frame', False):
-            if pattern.search(_shape_text(shape)):
-                return shape
+def _find_tag_shape(slide, tag_name: str):
+    pat = re.compile(r'<<\s*' + re.escape(tag_name) + r'\s*>>')
+    for shp in slide.shapes:
+        if getattr(shp, 'has_text_frame', False) and pat.search(_shape_text(shp)):
+            return shp
     return None
 
 
-def _cover_crop(pil_image: Image.Image, width: int, height: int):
-    img = pil_image.convert('RGB')
-    target_ratio = width / height
-    img_ratio = img.width / img.height if img.height else target_ratio
-    if img_ratio > target_ratio:
-        new_w = int(img.height * target_ratio)
-        x0 = max((img.width - new_w) // 2, 0)
-        img = img.crop((x0, 0, x0 + new_w, img.height))
+def _crop_cover(img: Image.Image, width: int, height: int):
+    img = img.convert('RGB')
+    tr = width / height
+    ir = img.width / img.height if img.height else tr
+    if ir > tr:
+        nw = int(img.height * tr)
+        x0 = max((img.width - nw) // 2, 0)
+        img = img.crop((x0, 0, x0 + nw, img.height))
     else:
-        new_h = int(img.width / target_ratio) if target_ratio else img.height
-        y0 = max((img.height - new_h) // 2, 0)
-        img = img.crop((0, y0, img.width, y0 + new_h))
+        nh = int(img.width / tr) if tr else img.height
+        y0 = max((img.height - nh) // 2, 0)
+        img = img.crop((0, y0, img.width, y0 + nh))
     return img
 
 
-def _replace_placeholder_with_photo(slide, placeholder_shape, pil_image: Image.Image):
-    left, top, width, height = placeholder_shape.left, placeholder_shape.top, placeholder_shape.width, placeholder_shape.height
-    img = _cover_crop(pil_image, width, height)
+def _replace_photo_shape(slide, shp, pil_image: Image.Image):
+    left, top, width, height = shp.left, shp.top, shp.width, shp.height
+    img = _crop_cover(pil_image, width, height)
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
     slide.shapes.add_picture(buf, left, top, width=width, height=height)
     try:
-        placeholder_shape._element.getparent().remove(placeholder_shape._element)
+        shp._element.getparent().remove(shp._element)
     except Exception:
         pass
 
@@ -82,11 +82,11 @@ def _replace_placeholder_with_photo(slide, placeholder_shape, pil_image: Image.I
 def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
     processed_photo_lookup = processed_photo_lookup or {}
     prs = Presentation(template_pptx_path_or_file)
-    if len(prs.slides) == 0:
+    if not prs.slides:
         raise ValueError('Template has no slides.')
     template_slide = prs.slides[0]
     for group in slide_groups:
-        new_slide = _duplicate_slide(prs, template_slide)
+        slide = _duplicate_slide(prs, template_slide)
         speakers = group.get('speakers', [])
         values = {
             'SESSION_NAME': str(group.get('SESSION_NAME', '') or ''),
@@ -97,18 +97,18 @@ def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dic
             'PLACEHOLDER_1': str(group.get('PLACEHOLDER_1', '') or ''),
             'PLACEHOLDER_2': str(group.get('PLACEHOLDER_2', '') or ''),
         }
-        for idx, sp in enumerate(speakers, start=1):
-            values[f'SPEAKER_NAME_{idx}'] = str(sp.get('name', '') or '')
-            values[f'SPEAKER_TITLE_{idx}'] = str(sp.get('title', '') or '')
-            values[f'SPEAKER_COMPANY_{idx}'] = str(sp.get('company', '') or '')
-        for shape in list(new_slide.shapes):
-            _replace_tag_text_preserve_runs(shape, values)
+        for i, sp in enumerate(speakers, start=1):
+            values[f'SPEAKER_NAME_{i}'] = str(sp.get('name', '') or '')
+            values[f'SPEAKER_TITLE_{i}'] = str(sp.get('title', '') or '')
+            values[f'SPEAKER_COMPANY_{i}'] = str(sp.get('company', '') or '')
+        for shp in list(slide.shapes):
+            _replace_text_in_shape(shp, values)
         if speakers:
-            photo_key = speakers[0].get('photo_key')
-            if photo_key and photo_key in processed_photo_lookup:
-                photo_placeholder = _find_photo_placeholder(new_slide, 'SPEAKER_PHOTO_1')
-                if photo_placeholder is not None:
-                    _replace_placeholder_with_photo(new_slide, photo_placeholder, processed_photo_lookup[photo_key])
+            key = speakers[0].get('photo_key')
+            if key and key in processed_photo_lookup:
+                photo_shape = _find_tag_shape(slide, 'SPEAKER_PHOTO_1')
+                if photo_shape is not None:
+                    _replace_photo_shape(slide, photo_shape, processed_photo_lookup[key])
     return prs
 
 
