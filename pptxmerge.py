@@ -1,166 +1,158 @@
-"""
-core/pptxmerge.py
-
-Replaces <<TAG>> placeholders on a duplicated copy of the template's first
-slide with real values, per output slide. Also inserts speaker photos into
-shapes tagged <<SPEAKER_PHOTO_n>> (photo is cropped/faced via the existing
-photoprocessor pipeline before insertion).
-
-Public entrypoint: build_merged_presentation(...)
-"""
-
-import re
 import copy
 import io
 from typing import List, Dict, Optional
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Emu
-from pptx.oxml.ns import qn
 
-from core.pptxtagparser import TAG_PATTERN
-
-DEFAULT_ROLE_LABEL = "Speaker"
+FIELD_MAP = {
+    'SESSION_NAME': 'SESSION_NAME',
+    'HALL_NAME': 'HALL_NAME',
+    'DATE': 'DATE',
+    'MAIN_SESSION_DETAILS': 'MAIN_SESSION_DETAILS',
+    'SPEAKER_SESSION_DETAILS': 'SPEAKER_SESSION_DETAILS',
+    'PLACEHOLDER_1': 'PLACEHOLDER_1',
+    'PLACEHOLDER_2': 'PLACEHOLDER_2',
+}
 
 
 def _duplicate_slide(prs: Presentation, source_slide):
-    """Duplicate a slide (layout + shapes) and append it to the end of prs."""
-    blank_slide_layout = source_slide.slide_layout
-    new_slide = prs.slides.add_slide(blank_slide_layout)
-
-    # remove any placeholder shapes streamlit/pptx auto-added from the layout
+    new_slide = prs.slides.add_slide(source_slide.slide_layout)
     for shape in list(new_slide.shapes):
-        shape._element.getparent().remove(shape._element)
-
+        try:
+            shape._element.getparent().remove(shape._element)
+        except Exception:
+            pass
     for shape in source_slide.shapes:
         new_el = copy.deepcopy(shape._element)
         new_slide.shapes._spTree.append(new_el)
-
     return new_slide
 
 
-def _replace_tag_in_text_frame(text_frame, tag_values: Dict[str, str]):
-    """Replace <<TAG>> occurrences inside a text frame, preserving run formatting.
-    Handles the common case where a tag is fully contained within a single run.
-    If a tag spans multiple runs (rare, due to manual mid-tag formatting), falls
-    back to a whole-paragraph text replace using the first run's formatting.
-    """
-    for para in text_frame.paragraphs:
-        for run in para.runs:
-            if "<<" in run.text and ">>" in run.text:
-                def _sub(m):
-                    key = m.group(1)
-                    return tag_values.get(key, m.group(0))
-                run.text = TAG_PATTERN.sub(_sub, run.text)
-
-        full_text = "".join(r.text for r in para.runs)
-        if "<<" in full_text and ">>" in full_text and para.runs:
-            def _sub2(m):
-                key = m.group(1)
-                return tag_values.get(key, m.group(0))
-            new_full = TAG_PATTERN.sub(_sub2, full_text)
-            if new_full != full_text:
-                para.runs[0].text = new_full
-                for extra_run in para.runs[1:]:
-                    extra_run.text = ""
+def _shape_text(shape):
+    if not getattr(shape, 'has_text_frame', False):
+        return ''
+    return '\n'.join(''.join(r.text for r in p.runs) if p.runs else p.text for p in shape.text_frame.paragraphs)
 
 
-def _find_photo_shape(slide, tag_name: str):
-    pattern = re.compile(r"<<\s*" + re.escape(tag_name) + r"\s*>>")
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            full_text = "".join(r.text for p in shape.text_frame.paragraphs for r in p.runs)
-            if pattern.search(full_text):
-                return shape
-    return None
+def _replace_entire_shape_text_preserve_first_run(shape, new_text: str):
+    if not getattr(shape, 'has_text_frame', False):
+        return False
+    tf = shape.text_frame
+    if not tf.paragraphs:
+        return False
+    p = tf.paragraphs[0]
+    if p.runs:
+        p.runs[0].text = new_text
+        for extra in list(p.runs)[1:]:
+            extra.text = ''
+    else:
+        p.text = new_text
+    for extra_p in list(tf.paragraphs)[1:]:
+        for r in extra_p.runs:
+            r.text = ''
+        if not extra_p.runs:
+            extra_p.text = ''
+    return True
 
 
-def _insert_photo_into_shape(slide, placeholder_shape, pil_image: Image.Image):
-    left, top, width, height = (
-        placeholder_shape.left,
-        placeholder_shape.top,
-        placeholder_shape.width,
-        placeholder_shape.height,
-    )
-    # clear the tag text so it doesn't render behind/near the photo
-    for para in placeholder_shape.text_frame.paragraphs:
-        for run in para.runs:
-            run.text = ""
+def _cover_crop(pil_image: Image.Image, width: int, height: int):
+    img = pil_image.convert('RGB')
+    target_ratio = width / height
+    img_ratio = img.width / img.height if img.height else target_ratio
+    if img_ratio > target_ratio:
+        new_w = int(img.height * target_ratio)
+        x0 = max((img.width - new_w) // 2, 0)
+        img = img.crop((x0, 0, x0 + new_w, img.height))
+    else:
+        new_h = int(img.width / target_ratio) if target_ratio else img.height
+        y0 = max((img.height - new_h) // 2, 0)
+        img = img.crop((0, y0, img.width, y0 + new_h))
+    return img
 
+
+def _replace_picture_in_picture_shape(slide, picture_shape, pil_image: Image.Image):
+    left, top, width, height = picture_shape.left, picture_shape.top, picture_shape.width, picture_shape.height
+    img = _cover_crop(pil_image, width, height)
     buf = io.BytesIO()
-    pil_image.convert("RGB").save(buf, format="PNG")
+    img.save(buf, format='PNG')
     buf.seek(0)
     slide.shapes.add_picture(buf, left, top, width=width, height=height)
+    try:
+        picture_shape._element.getparent().remove(picture_shape._element)
+    except Exception:
+        pass
 
-    # remove the now-empty placeholder textbox so it doesn't sit on top
-    placeholder_shape._element.getparent().remove(placeholder_shape._element)
+
+def _picture_candidates(slide):
+    pics = []
+    for shape in slide.shapes:
+        if getattr(shape, 'shape_type', None) == 13:
+            pics.append(shape)
+    return pics
 
 
-def build_merged_presentation(
-    template_pptx_path_or_file,
-    slide_groups: List[Dict],
-    processed_photo_lookup: Optional[Dict[str, Image.Image]] = None,
-):
-    """
-    template_pptx_path_or_file: path/file-like of the uploaded template pptx.
-    slide_groups: list of dicts, one per OUTPUT slide, each shaped like:
-        {
-            "SESSION_NAME": "...", "HALL_NAME": "...", "DATE": "...",
-            "MAIN_SESSION_DETAILS": "...", "SPEAKER_SESSION_DETAILS": "...",
-            "PLACEHOLDER_1": "...", "PLACEHOLDER_2": "...",
-            "speakers": [
-                {"name": "...", "title": "...", "company": "...", "photo_key": "..."},
-                ...
-            ]
-        }
-    processed_photo_lookup: dict mapping photo_key -> PIL.Image (already
-        processed/cropped by the existing photoprocessor pipeline).
-    Returns: pptx.Presentation with one slide generated per entry in slide_groups.
-    """
+def _largest_picture_near_center(slide):
+    pics = _picture_candidates(slide)
+    if not pics:
+        return None
+    slide_w = slide.part.slide_layout.part.package.presentation_part.presentation.slide_width
+    slide_h = slide.part.slide_layout.part.package.presentation_part.presentation.slide_height
+    cx = slide_w / 2
+    cy = slide_h / 2
+    def score(s):
+        area = s.width * s.height
+        scx = s.left + s.width / 2
+        scy = s.top + s.height / 2
+        dist = abs(scx - cx) + abs(scy - cy)
+        return (area, -dist)
+    pics.sort(key=score, reverse=True)
+    return pics[0]
+
+
+def _replace_text_shapes_by_order(slide, tag_values: Dict[str, str], speakers: List[Dict]):
+    text_shapes = [s for s in slide.shapes if getattr(s, 'has_text_frame', False)]
+    text_shapes.sort(key=lambda s: (s.top, s.left))
+    ordered_values = []
+    ordered_values.append(tag_values.get('MAIN_SESSION_DETAILS', ''))
+    ordered_values.append(tag_values.get('SPEAKER_SESSION_DETAILS', ''))
+    for idx, sp in enumerate(speakers, start=1):
+        ordered_values.extend([
+            sp.get('name', ''),
+            sp.get('title', ''),
+            sp.get('company', ''),
+        ])
+    ordered_values.append(tag_values.get('DATE', ''))
+    ordered_values.append(tag_values.get('HALL_NAME', ''))
+    targets = []
+    for s in text_shapes:
+        txt = _shape_text(s).strip()
+        if txt:
+            targets.append(s)
+    for shape, value in zip(targets, ordered_values):
+        _replace_entire_shape_text_preserve_first_run(shape, str(value or ''))
+
+
+def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
     processed_photo_lookup = processed_photo_lookup or {}
     prs = Presentation(template_pptx_path_or_file)
     if len(prs.slides) == 0:
-        raise ValueError("Template has no slides.")
+        raise ValueError('Template has no slides.')
     template_slide = prs.slides[0]
-
-    generated_slides = []
-
     for group in slide_groups:
         new_slide = _duplicate_slide(prs, template_slide)
-        generated_slides.append(new_slide)
-
-        tag_values: Dict[str, str] = {}
-        for key in [
-            "SESSION_NAME", "HALL_NAME", "DATE", "MAIN_SESSION_DETAILS",
-            "SPEAKER_SESSION_DETAILS", "PLACEHOLDER_1", "PLACEHOLDER_2",
-        ]:
-            tag_values[key] = str(group.get(key, "") or "")
-
-        speakers = group.get("speakers", [])
-        for idx, sp in enumerate(speakers, start=1):
-            tag_values[f"SPEAKER_NAME_{idx}"] = str(sp.get("name", "") or "")
-            tag_values[f"SPEAKER_TITLE_{idx}"] = str(sp.get("title", "") or "")
-            tag_values[f"SPEAKER_COMPANY_{idx}"] = str(sp.get("company", "") or "")
-
-        # text replacement pass
-        for shape in new_slide.shapes:
-            if shape.has_text_frame:
-                _replace_tag_in_text_frame(shape.text_frame, tag_values)
-
-        # photo insertion pass (after text pass so tag text is still detectable beforehand)
-        for idx, sp in enumerate(speakers, start=1):
-            photo_key = sp.get("photo_key")
-            if not photo_key or photo_key not in processed_photo_lookup:
-                continue
-            placeholder_shape = _find_photo_shape(new_slide, f"SPEAKER_PHOTO_{idx}")
-            if placeholder_shape is not None:
-                _insert_photo_into_shape(new_slide, placeholder_shape, processed_photo_lookup[photo_key])
-
-    # remove the original first slide (used only as the duplication source)
+        speakers = group.get('speakers', [])
+        if speakers:
+            photo_key = speakers[0].get('photo_key')
+            if photo_key and photo_key in processed_photo_lookup:
+                pic_shape = _largest_picture_near_center(new_slide)
+                if pic_shape is not None:
+                    _replace_picture_in_picture_shape(new_slide, pic_shape, processed_photo_lookup[photo_key])
+        tag_values = {k: str(group.get(k, '') or '') for k in FIELD_MAP.keys()}
+        _replace_text_shapes_by_order(new_slide, tag_values, speakers)
     xml_slides = prs.slides._sldIdLst
     slides = list(xml_slides)
-    xml_slides.remove(slides[0])
-
+    if slides:
+        xml_slides.remove(slides[0])
     return prs
 
 
