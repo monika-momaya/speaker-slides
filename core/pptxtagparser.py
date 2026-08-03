@@ -28,7 +28,11 @@ class TemplateTagReport:
 def _shape_text(shape):
     if not getattr(shape, "has_text_frame", False):
         return ""
-    return "\n".join(p.text for p in shape.text_frame.paragraphs)
+    texts = []
+    for p in shape.text_frame.paragraphs:
+        parts = [r.text for r in p.runs] if p.runs else [p.text]
+        texts.append("".join(parts))
+    return "\n".join(texts)
 
 
 def extract_tags_from_pptx(pptx_path_or_file) -> TemplateTagReport:
@@ -63,4 +67,7 @@ def extract_tags_from_pptx(pptx_path_or_file) -> TemplateTagReport:
     report.max_speaker_slot = max_slot
     if max_slot == 0:
         report.warnings.append("No <<SPEAKER_NAME_n>> style tags were found on slide 1.")
+    for slot in range(1, max_slot + 1):
+        if slot not in speaker_fields_present["SPEAKER_PHOTO_"]:
+            report.warnings.append(f"Missing <<SPEAKER_PHOTO_{slot}>> textbox placeholder.")
     return report
