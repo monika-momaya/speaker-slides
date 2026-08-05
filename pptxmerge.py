@@ -32,11 +32,6 @@ def _replace_text_in_shape(shape, values: Dict[str, str]):
         runs = para.runs
         if not runs:
             continue
-        # PowerPoint frequently splits a single typed tag like <<SESSION_NAME>>
-        # across multiple runs within the same paragraph (autocorrect, spell-check,
-        # incremental edits, etc). Matching tag-by-tag on individual runs misses
-        # these, so join the paragraph's runs first, do the substitution on the
-        # combined text, then write the result back into the first run.
         full_text = ''.join(r.text for r in runs)
         if '<<' not in full_text:
             continue
