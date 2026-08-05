@@ -2,8 +2,9 @@ import copy
 import io
 import re
 from typing import List, Dict, Optional
-from PIL import Image
+from PIL import Image, ImageDraw
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_AUTO_SHAPE_TYPE
 
 TAG_RE = re.compile(r'<<\s*([A-Z0-9_]+)\s*>>')
 
@@ -57,6 +58,32 @@ def _find_tag_shape(slide, tag_name: str):
     return None
 
 
+def _placeholder_mask_kind(shp):
+    """Detect whether the placeholder shape is an oval/circle so the
+    inserted photo can be masked to match, instead of always being a
+    plain rectangle that just covers the circle's bounding box."""
+    try:
+        if shp.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE and shp.auto_shape_type == MSO_AUTO_SHAPE_TYPE.OVAL:
+            return 'oval'
+    except Exception:
+        pass
+    return None
+
+
+def _mask_to_oval(img: Image.Image, supersample: int = 4) -> Image.Image:
+    """Return an RGBA copy of img with an elliptical alpha mask applied
+    (inscribed in img's full bounding box), antialiased via supersampling."""
+    w, h = img.size
+    big_w, big_h = w * supersample, h * supersample
+    mask = Image.new('L', (big_w, big_h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, big_w - 1, big_h - 1), fill=255)
+    mask = mask.resize((w, h), Image.LANCZOS)
+    img = img.convert('RGBA')
+    img.putalpha(mask)
+    return img
+
+
 def _crop_cover(img: Image.Image, width: int, height: int):
     img = img.convert('RGB')
     tr = width / height
@@ -74,7 +101,10 @@ def _crop_cover(img: Image.Image, width: int, height: int):
 
 def _replace_photo_shape(slide, shp, pil_image: Image.Image):
     left, top, width, height = shp.left, shp.top, shp.width, shp.height
+    mask_kind = _placeholder_mask_kind(shp)
     img = _crop_cover(pil_image, width, height)
+    if mask_kind == 'oval':
+        img = _mask_to_oval(img)
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
