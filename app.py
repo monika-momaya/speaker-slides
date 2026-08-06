@@ -101,19 +101,21 @@ else:
         try:
             photo_filenames = [pf.name for pf in photo_files]
             photo_file_lookup = {pf.name: pf for pf in photo_files}
+            # Match each UNIQUE photo_key exactly once. The same photo_key
+            # can legitimately appear on multiple rows (e.g. a speaker who
+            # is both on a panel and has their own individual-slide row,
+            # or the same speaker across multiple sessions). Matching
+            # every occurrence separately would make later duplicates
+            # compete for and exhaust an already-consumed filename pool,
+            # causing them to fall back to an unrelated file.
             wanted_names = []
             for g in slide_groups:
                 for sp in g["speakers"]:
-                    if sp.get("photo_key"):
-                        wanted_names.append(str(sp["photo_key"]))
+                    key = sp.get("photo_key")
+                    if key and str(key) not in wanted_names:
+                        wanted_names.append(str(key))
             match_results = matchphotostospeakers(wanted_names, photo_filenames)
-            wanted_to_chosen = {}
-            idx = 0
-            for g in slide_groups:
-                for sp in g["speakers"]:
-                    if sp.get("photo_key"):
-                        wanted_to_chosen[str(sp["photo_key"])] = match_results[idx].matchedfilename
-                        idx += 1
+            wanted_to_chosen = {name: r.matchedfilename for name, r in zip(wanted_names, match_results)}
             for wanted_key, matched_filename in wanted_to_chosen.items():
                 if matched_filename and matched_filename in photo_file_lookup:
                     raw_img = Image.open(photo_file_lookup[matched_filename])
