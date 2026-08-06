@@ -2,8 +2,9 @@ import copy
 import io
 import re
 from typing import List, Dict, Optional
-from PIL import Image
+from PIL import Image, ImageDraw
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_AUTO_SHAPE_TYPE
 
 TAG_RE = re.compile(r'<<\s*([A-Z0-9_]+)\s*>>')
 
@@ -29,17 +30,23 @@ def _replace_text_in_shape(shape, values: Dict[str, str]):
     changed = False
     tf = shape.text_frame
     for para in tf.paragraphs:
-        for run in para.runs:
-            txt = run.text or ''
-            if '<<' not in txt:
-                continue
-            def repl(m):
-                key = m.group(1)
-                return str(values.get(key, m.group(0)) or '')
-            new_txt = TAG_RE.sub(repl, txt)
-            if new_txt != txt:
-                run.text = new_txt
-                changed = True
+        runs = para.runs
+        if not runs:
+            continue
+        full_text = ''.join(r.text for r in runs)
+        if '<<' not in full_text:
+            continue
+
+        def repl(m):
+            key = m.group(1)
+            return str(values.get(key, m.group(0)) or '')
+
+        new_text = TAG_RE.sub(repl, full_text)
+        if new_text != full_text:
+            runs[0].text = new_text
+            for run in runs[1:]:
+                run.text = ''
+            changed = True
     return changed
 
 
@@ -49,6 +56,32 @@ def _find_tag_shape(slide, tag_name: str):
         if getattr(shp, 'has_text_frame', False) and pat.search(_shape_text(shp)):
             return shp
     return None
+
+
+def _placeholder_mask_kind(shp):
+    """Detect whether the placeholder shape is an oval/circle so the
+    inserted photo can be masked to match, instead of always being a
+    plain rectangle that just covers the circle's bounding box."""
+    try:
+        if shp.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE and shp.auto_shape_type == MSO_AUTO_SHAPE_TYPE.OVAL:
+            return 'oval'
+    except Exception:
+        pass
+    return None
+
+
+def _mask_to_oval(img: Image.Image, supersample: int = 4) -> Image.Image:
+    """Return an RGBA copy of img with an elliptical alpha mask applied
+    (inscribed in img's full bounding box), antialiased via supersampling."""
+    w, h = img.size
+    big_w, big_h = w * supersample, h * supersample
+    mask = Image.new('L', (big_w, big_h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, big_w - 1, big_h - 1), fill=255)
+    mask = mask.resize((w, h), Image.LANCZOS)
+    img = img.convert('RGBA')
+    img.putalpha(mask)
+    return img
 
 
 def _crop_cover(img: Image.Image, width: int, height: int):
@@ -68,7 +101,10 @@ def _crop_cover(img: Image.Image, width: int, height: int):
 
 def _replace_photo_shape(slide, shp, pil_image: Image.Image):
     left, top, width, height = shp.left, shp.top, shp.width, shp.height
+    mask_kind = _placeholder_mask_kind(shp)
     img = _crop_cover(pil_image, width, height)
+    if mask_kind == 'oval':
+        img = _mask_to_oval(img)
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
@@ -103,10 +139,10 @@ def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dic
             values[f'SPEAKER_COMPANY_{i}'] = str(sp.get('company', '') or '')
         for shp in list(slide.shapes):
             _replace_text_in_shape(shp, values)
-        if speakers:
-            key = speakers[0].get('photo_key')
+        for i, sp in enumerate(speakers, start=1):
+            key = sp.get('photo_key')
             if key and key in processed_photo_lookup:
-                photo_shape = _find_tag_shape(slide, 'SPEAKER_PHOTO_1')
+                photo_shape = _find_tag_shape(slide, f'SPEAKER_PHOTO_{i}')
                 if photo_shape is not None:
                     _replace_photo_shape(slide, photo_shape, processed_photo_lookup[key])
     return prs
