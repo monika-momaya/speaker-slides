@@ -115,6 +115,33 @@ def _replace_photo_shape(slide, shp, pil_image: Image.Image):
         pass
 
 
+LEFTOVER_TEXT_TAG_RE = re.compile(r'<<\s*SPEAKER_(?:NAME|TITLE|COMPANY)_(\d+)\s*>>')
+LEFTOVER_PHOTO_TAG_RE = re.compile(r'<<\s*SPEAKER_PHOTO_(\d+)\s*>>')
+
+
+def _clean_unused_speaker_slots(slide):
+    """After the known speakers for this group have been filled in, some
+    slots on a multi-speaker template may be left over (e.g. a 4-speaker
+    template used for a 2-speaker slide). Blank any leftover
+    SPEAKER_NAME/TITLE/COMPANY_n text and remove any leftover
+    SPEAKER_PHOTO_n placeholder shape entirely, so unused slots disappear
+    cleanly instead of showing raw tag text or an empty circle."""
+    for shp in list(slide.shapes):
+        if not getattr(shp, 'has_text_frame', False):
+            continue
+        text = _shape_text(shp)
+        if LEFTOVER_PHOTO_TAG_RE.search(text):
+            try:
+                shp._element.getparent().remove(shp._element)
+            except Exception:
+                pass
+            continue
+        if LEFTOVER_TEXT_TAG_RE.search(text):
+            for para in shp.text_frame.paragraphs:
+                for run in para.runs:
+                    run.text = LEFTOVER_TEXT_TAG_RE.sub('', run.text)
+
+
 def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
     processed_photo_lookup = processed_photo_lookup or {}
     prs = Presentation(template_pptx_path_or_file)
@@ -145,6 +172,7 @@ def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dic
                 photo_shape = _find_tag_shape(slide, f'SPEAKER_PHOTO_{i}')
                 if photo_shape is not None:
                     _replace_photo_shape(slide, photo_shape, processed_photo_lookup[key])
+        _clean_unused_speaker_slots(slide)
     return prs
 
 
