@@ -153,24 +153,32 @@ LEFTOVER_TEXT_TAG_RE = re.compile(r'<<\s*SPEAKER_(?:NAME|TITLE|COMPANY)_(\d+)\s*
 LEFTOVER_PHOTO_TAG_RE = re.compile(r'<<\s*SPEAKER_PHOTO_(\d+)\s*>>')
 
 
-def _clean_unused_speaker_slots(slide):
+def _clean_unused_speaker_slots(slide, used_slot_count: int):
     """After the known speakers for this group have been filled in, some
     slots on a multi-speaker template may be left over (e.g. a 4-speaker
     template used for a 2-speaker slide). Blank any leftover
     SPEAKER_NAME/TITLE/COMPANY_n text and remove any leftover
-    SPEAKER_PHOTO_n placeholder shape entirely, so unused slots disappear
-    cleanly instead of showing raw tag text or an empty circle."""
+    SPEAKER_PHOTO_n placeholder shape, but ONLY for slot numbers beyond
+    used_slot_count. A slot within used_slot_count that still shows its
+    raw <<SPEAKER_PHOTO_n>> tag means a real speaker's photo failed to
+    match/insert (e.g. filename mismatch or no photo uploaded) — that
+    shape is left alone rather than silently deleted, so the problem is
+    visible instead of just disappearing."""
     for shp in list(slide.shapes):
         if not getattr(shp, 'has_text_frame', False):
             continue
         text = _shape_text(shp)
-        if LEFTOVER_PHOTO_TAG_RE.search(text):
+
+        photo_match = LEFTOVER_PHOTO_TAG_RE.search(text)
+        if photo_match and int(photo_match.group(1)) > used_slot_count:
             try:
                 shp._element.getparent().remove(shp._element)
             except Exception:
                 pass
             continue
-        if LEFTOVER_TEXT_TAG_RE.search(text):
+
+        text_match = LEFTOVER_TEXT_TAG_RE.search(text)
+        if text_match and int(text_match.group(1)) > used_slot_count:
             for para in shp.text_frame.paragraphs:
                 for run in para.runs:
                     run.text = LEFTOVER_TEXT_TAG_RE.sub('', run.text)
@@ -231,7 +239,7 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
             photo_shape = _find_tag_shape(slide, f'SPEAKER_PHOTO_{i}')
             if photo_shape is not None:
                 _replace_photo_shape(slide, photo_shape, processed_photo_lookup[key])
-    _clean_unused_speaker_slots(slide)
+    _clean_unused_speaker_slots(slide, len(speakers))
 
 
 def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
