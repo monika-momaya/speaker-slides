@@ -2,7 +2,14 @@ from typing import List, Dict
 import openpyxl
 SINGLE_FIELD_KEYS = ["SESSION_NAME", "HALL_NAME", "DATE", "MAIN_SESSION_DETAILS", "SPEAKER_SESSION_DETAILS", "PLACEHOLDER_1", "PLACEHOLDER_2"]
 
-def read_merge_sheet(file_obj, max_speaker_slot: int):
+def read_merge_sheet(file_obj, max_speaker_slot: int = None):
+    """max_speaker_slot is accepted for backward compatibility but is no
+    longer used to drop speakers: build_merged_presentation now handles
+    groups of any size itself (a combined panel slide using as many
+    speakers as the panel template supports, followed by one individual
+    slide per speaker using the single-speaker template), so truncating
+    the speaker list here would incorrectly lose speakers who should
+    still get their own individual slide."""
     wb = openpyxl.load_workbook(file_obj, data_only=True)
     ws = wb["SlideData"] if "SlideData" in wb.sheetnames else wb.active
     headers = [c.value for c in ws[1]]
@@ -38,10 +45,5 @@ def read_merge_sheet(file_obj, max_speaker_slot: int):
             new_group_data['speakers'] = [speaker_entry]
             new_group_data['_label'] = None
             groups.append(new_group_data)
-    overflow_warnings = []
-    for g in groups:
-        if max_speaker_slot > 0 and len(g['speakers']) > max_speaker_slot:
-            label = g.get('_label') or '(individual slide)'
-            overflow_warnings.append(f"Group '{label}' has {len(g['speakers'])} speakers but the template only supports {max_speaker_slot} speaker slot(s). Extra speakers will be dropped.")
-            g['speakers'] = g['speakers'][:max_speaker_slot]
+    overflow_warnings: List[str] = []
     return groups, overflow_warnings
