@@ -74,9 +74,6 @@ def _placeholder_mask_kind(shp):
 
 
 def _rounded_rect_corner_radius(shp, img_w: int, img_h: int) -> int:
-    """Approximate the corner radius (in output pixels) PowerPoint would
-    render for this rounded-rectangle shape, using its adjustment value
-    if available, else a sensible default proportion."""
     try:
         adj = shp.adjustments[0]
     except Exception:
@@ -86,8 +83,6 @@ def _rounded_rect_corner_radius(shp, img_w: int, img_h: int) -> int:
 
 
 def _mask_to_oval(img: Image.Image, supersample: int = 4) -> Image.Image:
-    """Return an RGBA copy of img with an elliptical alpha mask applied
-    (inscribed in img's full bounding box), antialiased via supersampling."""
     w, h = img.size
     big_w, big_h = w * supersample, h * supersample
     mask = Image.new('L', (big_w, big_h), 0)
@@ -100,8 +95,6 @@ def _mask_to_oval(img: Image.Image, supersample: int = 4) -> Image.Image:
 
 
 def _mask_to_rounded_rect(img: Image.Image, radius: int, supersample: int = 4) -> Image.Image:
-    """Return an RGBA copy of img with a rounded-rectangle alpha mask
-    applied, antialiased via supersampling."""
     w, h = img.size
     big_w, big_h = w * supersample, h * supersample
     mask = Image.new('L', (big_w, big_h), 0)
@@ -135,8 +128,6 @@ def _replace_photo_shape(slide, shp, pil_image: Image.Image):
     if mask_kind == 'oval':
         img = _mask_to_oval(img)
     elif mask_kind == 'rounded_rect':
-        # width/height are EMUs; use the pixel size of img (already
-        # matches the box's aspect ratio) to compute a proportional radius
         radius = _rounded_rect_corner_radius(shp, img.width, img.height)
         img = _mask_to_rounded_rect(img, radius)
     buf = io.BytesIO()
@@ -154,16 +145,11 @@ LEFTOVER_PHOTO_TAG_RE = re.compile(r'<<\s*SPEAKER_PHOTO_(\d+)\s*>>')
 
 
 def _clean_unused_speaker_slots(slide, used_slot_count: int):
-    """After the known speakers for this group have been filled in, some
-    slots on a multi-speaker template may be left over (e.g. a 4-speaker
-    template used for a 2-speaker slide). Blank any leftover
-    SPEAKER_NAME/TITLE/COMPANY_n text and remove any leftover
-    SPEAKER_PHOTO_n placeholder shape, but ONLY for slot numbers beyond
+    """Blank leftover SPEAKER_NAME/TITLE/COMPANY/ROLE_n text and remove
+    leftover SPEAKER_PHOTO_n placeholders, only for slot numbers beyond
     used_slot_count. A slot within used_slot_count that still shows its
-    raw <<SPEAKER_PHOTO_n>> tag means a real speaker's photo failed to
-    match/insert (e.g. filename mismatch or no photo uploaded) — that
-    shape is left alone rather than silently deleted, so the problem is
-    visible instead of just disappearing."""
+    raw tag means a real speaker's photo failed to match/insert, so it is
+    left visible rather than silently deleted."""
     for shp in list(slide.shapes):
         if not getattr(shp, 'has_text_frame', False):
             continue
@@ -188,9 +174,6 @@ SPEAKER_SLOT_TAG_RE = re.compile(r'SPEAKER_(?:NAME|TITLE|COMPANY|ROLE|PHOTO)_(\d
 
 
 def _detect_max_speaker_slot(slide) -> int:
-    """Scan a template slide's shapes for the highest SPEAKER_..._n tag
-    suffix present, so we know how many speakers that particular layout
-    (single vs panel) can actually hold."""
     max_slot = 0
     for shp in slide.shapes:
         text = _shape_text(shp)
@@ -226,7 +209,7 @@ def _base_values(group: Dict) -> Dict[str, str]:
 def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_photo_lookup: Dict[str, Image.Image], shared_roles: Optional[Dict[str, str]] = None):
     """Fill a duplicated slide's text and photo tags for the given
     speakers (positioned starting at slot 1), then clean up any leftover
-    unused speaker slots the layout has room for but weren't used."""
+    unused speaker slots."""
     for i, sp in enumerate(speakers, start=1):
         values[f'SPEAKER_NAME_{i}'] = str(sp.get('name', '') or '')
         values[f'SPEAKER_TITLE_{i}'] = str(sp.get('title', '') or '')
@@ -244,7 +227,6 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
                 values[f'SPEAKER_ROLE_{i}'] = shared if role.lower() != prev else ''
             prev = role.lower() if role else None
             if not values[f'SPEAKER_ROLE_{i}']:
-                # no label for this slot: remove its role box entirely if it holds only the tag
                 box = _find_tag_shape(slide, f'SPEAKER_ROLE_{i}')
                 if box is not None and TAG_RE.sub('', _shape_text(box)).strip() == '':
                     try:
@@ -252,8 +234,7 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
                     except Exception:
                         pass
     if len(speakers) == 1:
-        # Individual slide: <<PLACEHOLDER_1>>/<<PLACEHOLDER_2>> belong to THIS speaker's
-        # own row (e.g. Moderator / Chair / Keynote), not to whichever row came first.
+        # Individual slide: PLACEHOLDER_1/2 belong to THIS speaker's own row
         values['PLACEHOLDER_1'] = str(speakers[0].get('placeholder_1', '') or speakers[0].get('role', '') or values.get('PLACEHOLDER_1', ''))
         values['PLACEHOLDER_2'] = str(speakers[0].get('placeholder_2', '') or values.get('PLACEHOLDER_2', ''))
     for shp in list(slide.shapes):
@@ -270,26 +251,21 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
 def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
     """Generate the merged deck.
 
-    The template pptx's slide 1 (index 0) is always the single-speaker
-    layout, used for any group with exactly one speaker, and also used
-    to generate one dedicated slide per speaker for multi-speaker
-    (panel) groups.
+    Template slide 1 (index 0) is the single-speaker layout. It is used
+    ONLY for groups with exactly one speaker (rows where the
+    'Require Single Slide' column is left empty).
 
-    Any additional slides (index 1, 2, 3, ...) are treated as panel
-    "tiers" of increasing capacity, in any order — e.g. one slide with
-    room for 3 speakers, another with room for 6, another for 9. Each
-    tier's capacity is auto-detected from its own SPEAKER_..._n tags.
-    For a multi-speaker group, the SMALLEST tier that can still fit all
-    of that group's speakers is used for the combined panel slide (so a
-    4-speaker panel uses a 6-speaker tier rather than a 9-speaker one,
-    if both exist, keeping the layout as tight as possible). If no tier
-    is big enough, the largest available tier is used, filled to its
-    capacity. Either way, every speaker in the group still gets their
-    own individual slide afterwards, built from the single-speaker
-    layout, so nobody is silently dropped.
+    Any additional template slides (index 1, 2, 3, ...) are panel
+    "tiers" of increasing capacity, auto-detected from their
+    SPEAKER_..._n tags. A group with 2 or more speakers (same
+    'Require Single Slide' label, e.g. 'Panel 1') gets ONE panel slide,
+    using the smallest tier that fits everyone. No individual slides are
+    made for panel members.
 
-    The original template slide(s) are removed from the final output so
-    the deck contains only the generated content.
+    If the template has no panel tier at all, a multi-speaker group falls
+    back to one single-speaker slide per person, so nobody is lost.
+
+    The original template slide(s) are removed from the final output.
     """
     processed_photo_lookup = processed_photo_lookup or {}
     prs = Presentation(template_pptx_path_or_file)
@@ -299,8 +275,6 @@ def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dic
     num_template_slides = len(prs.slides)
     single_template_slide = prs.slides[0]
 
-    # Build the list of (capacity, slide) tiers from any slides beyond index 0,
-    # sorted smallest-capacity first so we can pick the tightest fit.
     tiers = []
     for idx in range(1, num_template_slides):
         tier_slide = prs.slides[idx]
@@ -319,22 +293,18 @@ def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dic
         speakers = group.get('speakers', [])
         base_values = _base_values(group)
 
-        if len(speakers) > 1 and tiers:
-            capacity, tier_slide = _best_tier(len(speakers))
-            if tier_slide is not None:
-                panel_slide = _duplicate_slide(prs, tier_slide)
-                _fill_slide(panel_slide, dict(base_values), speakers[:capacity], processed_photo_lookup, group.get('_shared_roles'))
-
         if len(speakers) <= 1:
             slide = _duplicate_slide(prs, single_template_slide)
             _fill_slide(slide, dict(base_values), speakers, processed_photo_lookup)
+        elif tiers:
+            capacity, tier_slide = _best_tier(len(speakers))
+            panel_slide = _duplicate_slide(prs, tier_slide)
+            _fill_slide(panel_slide, dict(base_values), speakers[:capacity], processed_photo_lookup, group.get('_shared_roles'))
         else:
-            # one dedicated individual slide per speaker, right after the panel slide
             for sp in speakers:
                 slide = _duplicate_slide(prs, single_template_slide)
                 _fill_slide(slide, dict(base_values), [sp], processed_photo_lookup)
 
-    # Remove the original template slide(s) so only generated content remains.
     for _ in range(num_template_slides):
         _delete_slide(prs, 0)
 
