@@ -1,6 +1,7 @@
 import io
 import os
 import streamlit as st
+import core
 from PIL import Image
 
 from core.pptxtagparser import extract_tags_from_pptx, TemplateTagReport
@@ -15,6 +16,11 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 st.set_page_config(page_title="Soft Slide Generator", layout="wide")
 
 with st.sidebar:
+    _v = getattr(core, "CORE_VERSION", None)
+    if _v:
+        st.caption(f"core build: {_v}")
+    else:
+        st.error("core/ folder is OLD - replace the whole folder and reboot the app.")
     st.header("Template tags")
     st.markdown("""
 Type these exact tags inside textboxes in your PPTX template:
