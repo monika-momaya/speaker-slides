@@ -14,7 +14,7 @@ def build_excel_template_bytes(report: TemplateTagReport) -> bytes:
             columns.append(tag)
     for slot in range(1, report.max_speaker_slot + 1):
         columns += [f"SPEAKER_NAME_{slot}", f"SPEAKER_TITLE_{slot}", f"SPEAKER_COMPANY_{slot}", f"SPEAKER_PHOTO_FILENAME_{slot}"]
-    if getattr(report, "has_role_tag", False) and report.max_speaker_slot > 0:
+    if report.max_speaker_slot > 0:
         columns.append("SPEAKER_ROLE_1")
     columns.append("Require Single Slide")
     header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
