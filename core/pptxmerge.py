@@ -59,9 +59,6 @@ def _find_tag_shape(slide, tag_name: str):
 
 
 def _placeholder_mask_kind(shp):
-    """Detect the placeholder shape's outline so the inserted photo can
-    be masked to match, instead of always being a plain hard-edged
-    rectangle that just covers the shape's bounding box."""
     try:
         if shp.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
             if shp.auto_shape_type == MSO_AUTO_SHAPE_TYPE.OVAL:
@@ -77,7 +74,7 @@ def _rounded_rect_corner_radius(shp, img_w: int, img_h: int) -> int:
     try:
         adj = shp.adjustments[0]
     except Exception:
-        adj = 0.16  # PowerPoint's default rounded-rectangle adjustment
+        adj = 0.16
     short_side = min(img_w, img_h)
     return max(1, int(short_side * adj))
 
@@ -145,11 +142,6 @@ LEFTOVER_PHOTO_TAG_RE = re.compile(r'<<\s*SPEAKER_PHOTO_(\d+)\s*>>')
 
 
 def _clean_unused_speaker_slots(slide, used_slot_count: int):
-    """Blank leftover SPEAKER_NAME/TITLE/COMPANY/ROLE_n text and remove
-    leftover SPEAKER_PHOTO_n placeholders, only for slot numbers beyond
-    used_slot_count. A slot within used_slot_count that still shows its
-    raw tag means a real speaker's photo failed to match/insert, so it is
-    left visible rather than silently deleted."""
     for shp in list(slide.shapes):
         if not getattr(shp, 'has_text_frame', False):
             continue
@@ -207,17 +199,12 @@ def _base_values(group: Dict) -> Dict[str, str]:
 
 
 def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_photo_lookup: Dict[str, Image.Image], shared_roles: Optional[Dict[str, str]] = None):
-    """Fill a duplicated slide's text and photo tags for the given
-    speakers (positioned starting at slot 1), then clean up any leftover
-    unused speaker slots."""
     for i, sp in enumerate(speakers, start=1):
         values[f'SPEAKER_NAME_{i}'] = str(sp.get('name', '') or '')
         values[f'SPEAKER_TITLE_{i}'] = str(sp.get('title', '') or '')
         values[f'SPEAKER_COMPANY_{i}'] = str(sp.get('company', '') or '')
         values[f'SPEAKER_ROLE_{i}'] = str(sp.get('role', '') or '')
     if len(speakers) > 1:
-        # Panel slide: a run of consecutive speakers with a "shared" role (e.g. Panelist)
-        # gets ONE label ("Panelists") on the first of them; the rest get none.
         shared_roles = shared_roles if shared_roles is not None else {'panelist': 'Panelists'}
         prev = None
         for i, sp in enumerate(speakers, start=1):
@@ -234,14 +221,14 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
                     except Exception:
                         pass
     if len(speakers) == 1:
-        # Individual slide: PLACEHOLDER_1/2 belong to THIS speaker's own row
         values['PLACEHOLDER_1'] = str(speakers[0].get('placeholder_1', '') or speakers[0].get('role', '') or values.get('PLACEHOLDER_1', ''))
         values['PLACEHOLDER_2'] = str(speakers[0].get('placeholder_2', '') or values.get('PLACEHOLDER_2', ''))
-        for k in list(values):
-        if k.startswith('SPEAKER_ROLE_'):
-            values[k] = values[k].upper()
-    if len(speakers) == 1:
-        values['PLACEHOLDER_1'] = values.get('PLACEHOLDER_1', '').upper()
+        values['PLACEHOLDER_1'] = values['PLACEHOLDER_1'].upper()
+
+    for key_name in list(values.keys()):
+        if key_name.startswith('SPEAKER_ROLE_'):
+            values[key_name] = values[key_name].upper()
+
     for shp in list(slide.shapes):
         _replace_text_in_shape(shp, values)
     for i, sp in enumerate(speakers, start=1):
@@ -254,24 +241,11 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
 
 
 def build_merged_presentation(template_pptx_path_or_file, slide_groups: List[Dict], processed_photo_lookup: Optional[Dict[str, Image.Image]] = None):
-    """Generate the merged deck.
-
-    Template slide 1 (index 0) is the single-speaker layout. It is used
-    ONLY for groups with exactly one speaker (rows where the
-    'Require Single Slide' column is left empty).
-
-    Any additional template slides (index 1, 2, 3, ...) are panel
-    "tiers" of increasing capacity, auto-detected from their
-    SPEAKER_..._n tags. A group with 2 or more speakers (same
-    'Require Single Slide' label, e.g. 'Panel 1') gets ONE panel slide,
-    using the smallest tier that fits everyone. No individual slides are
-    made for panel members.
-
-    If the template has no panel tier at all, a multi-speaker group falls
-    back to one single-speaker slide per person, so nobody is lost.
-
-    The original template slide(s) are removed from the final output.
-    """
+    """Template slide 1 is the single-speaker layout, used only for groups
+    with one speaker (empty 'Require Single Slide' cell). Extra template
+    slides are panel tiers; a multi-speaker group gets ONE panel slide
+    using the smallest tier that fits. If there is no panel tier, it
+    falls back to one single slide per person."""
     processed_photo_lookup = processed_photo_lookup or {}
     prs = Presentation(template_pptx_path_or_file)
     if not prs.slides:
