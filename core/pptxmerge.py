@@ -237,6 +237,11 @@ def _fill_slide(slide, values: Dict[str, str], speakers: List[Dict], processed_p
         # Individual slide: PLACEHOLDER_1/2 belong to THIS speaker's own row
         values['PLACEHOLDER_1'] = str(speakers[0].get('placeholder_1', '') or speakers[0].get('role', '') or values.get('PLACEHOLDER_1', ''))
         values['PLACEHOLDER_2'] = str(speakers[0].get('placeholder_2', '') or values.get('PLACEHOLDER_2', ''))
+        for k in list(values):
+        if k.startswith('SPEAKER_ROLE_'):
+            values[k] = values[k].upper()
+    if len(speakers) == 1:
+        values['PLACEHOLDER_1'] = values.get('PLACEHOLDER_1', '').upper()
     for shp in list(slide.shapes):
         _replace_text_in_shape(shp, values)
     for i, sp in enumerate(speakers, start=1):
